@@ -55,7 +55,8 @@ use MOM_ALE,                   only : ALE_getCoordinate, ALE_getCoordinateUnits,
 use MOM_ALE,                   only : ALE_updateVerticalGridType, ALE_remap_init_conds, pre_ALE_adjustments
 use MOM_ALE,                   only : ALE_remap_tracers, ALE_remap_velocities
 use MOM_ALE,                   only : ALE_remap_set_h_vel, ALE_remap_set_h_vel_via_dz
-use MOM_ALE,                   only : ALE_update_regrid_weights, pre_ALE_diagnostics, ALE_register_diags
+use MOM_ALE,                   only : ALE_update_regrid_weights, ALE_register_diags
+use MOM_ALE,                   only : pre_ALE_diagnostics, post_ALE_diagnostics
 use MOM_ALE,                   only : ALE_set_extrap_boundaries
 use MOM_ALE_sponge,            only : rotate_ALE_sponge, update_ALE_sponge_field
 use MOM_barotropic,            only : Barotropic_CS
@@ -1815,7 +1816,11 @@ subroutine ALE_regridding_and_remapping(CS, G, GV, US, u, v, h, tv, dtdia, Time_
   endif
   call cpu_clock_begin(id_clock_ALE)
 
-  call pre_ALE_diagnostics(G, GV, US, h, u, v, tv, CS%ALE_CSp)
+  if (use_ice_shelf) then
+    call pre_ALE_diagnostics(G, GV, US, h, u, v, tv, CS%ALE_CSp, CS%frac_shelf_h)
+  else
+    call pre_ALE_diagnostics(G, GV, US, h, u, v, tv, CS%ALE_CSp)
+  endif
   call ALE_update_regrid_weights(dtdia, CS%ALE_CSp)
   ! Do any necessary adjustments ot the state prior to remapping.
   call pre_ALE_adjustments(G, GV, US, h, tv, CS%tracer_Reg, CS%ALE_CSp, u, v)
@@ -1870,6 +1875,12 @@ subroutine ALE_regridding_and_remapping(CS, G, GV, US, u, v, h, tv, dtdia, Time_
   do k=1,nz ; do j=js-1,je+1 ; do i=is-1,ie+1
     h(i,j,k) = h_new(i,j,k)
   enddo ; enddo ; enddo
+
+  if (use_ice_shelf) then
+    call post_ALE_diagnostics(G, GV, US, h, u, v, tv, CS%ALE_CSp, CS%frac_shelf_h)
+  else
+    call post_ALE_diagnostics(G, GV, US, h, u, v, tv, CS%ALE_CSp)
+  endif
 
   if (showCallTree) call callTree_waypoint("finished ALE_regrid (ALE_regridding_and_remapping)")
   call cpu_clock_end(id_clock_ALE)

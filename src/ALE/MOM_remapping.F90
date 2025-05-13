@@ -9,6 +9,7 @@ use MOM_string_functions, only : uppercase
 use numerical_testing_type, only : testing
 use regrid_edge_values, only : edge_values_explicit_h4, edge_values_implicit_h4
 use regrid_edge_values, only : edge_values_explicit_h4cw
+use regrid_edge_values, only : edge_values_explicit_k4cw
 use regrid_edge_values, only : edge_values_implicit_h4, edge_values_implicit_h6
 use regrid_edge_values, only : edge_slopes_implicit_h3, edge_slopes_implicit_h5
 use PCM_functions, only : PCM_reconstruction
@@ -90,6 +91,7 @@ integer, parameter  :: REMAPPING_PCM        = 0 !< O(h^1) remapping scheme
 integer, parameter  :: REMAPPING_PLM        = 2 !< O(h^2) remapping scheme
 integer, parameter  :: REMAPPING_PLM_HYBGEN = 3 !< O(h^2) remapping scheme
 integer, parameter  :: REMAPPING_PPM_CW     =10 !< O(h^3) remapping scheme
+integer, parameter  :: REMAPPING_PPM_CWK    =11 !< O(h^3) remapping scheme on uniform grid
 integer, parameter  :: REMAPPING_PPM_H4     = 4 !< O(h^3) remapping scheme
 integer, parameter  :: REMAPPING_PPM_IH4    = 5 !< O(h^3) remapping scheme
 integer, parameter  :: REMAPPING_PPM_HYBGEN = 6 !< O(h^3) remapping scheme
@@ -198,8 +200,9 @@ subroutine remapping_set_param(CS, remapping_scheme, boundary_extrapolation,  &
 
 end subroutine remapping_set_param
 
-subroutine extract_member_remapping_CS(CS, remapping_scheme, degree, boundary_extrapolation, check_reconstruction, &
-                                       check_remapping, force_bounds_in_subcell, force_bounds_in_target, &
+subroutine extract_member_remapping_CS(CS, remapping_scheme, degree, boundary_extrapolation, &
+                                       check_reconstruction, check_remapping, &
+                                       force_bounds_in_subcell, force_bounds_in_target, &
                                        better_force_bounds_in_target, offset_tgt_summation)
   type(remapping_CS), intent(in) :: CS !< Control structure for remapping module
   integer, optional, intent(out) :: remapping_scheme        !< Determines which reconstruction scheme to use
@@ -451,7 +454,8 @@ subroutine build_reconstructions_1d( CS, n0, h0, u0, ppoly_r_coefs, &
     local_remapping_scheme = REMAPPING_PCM
   elseif (n0<=3) then
     local_remapping_scheme = min( local_remapping_scheme, REMAPPING_PLM )
-  elseif (n0<=4 .and. local_remapping_scheme /= REMAPPING_PPM_CW ) then
+  elseif (n0<=4 .and. local_remapping_scheme /= REMAPPING_PPM_CW &
+                .and. local_remapping_scheme /= REMAPPING_PPM_CWK) then
     local_remapping_scheme = min( local_remapping_scheme, REMAPPING_PPM_H4 )
   endif
   select case ( local_remapping_scheme )
@@ -477,6 +481,14 @@ subroutine build_reconstructions_1d( CS, n0, h0, u0, ppoly_r_coefs, &
     case ( REMAPPING_PPM_CW )
       ! identical to REMAPPING_PPM_HYBGEN
       call edge_values_explicit_h4cw( n0, h0, u0, ppoly_r_E, h_neg_edge )
+      call PPM_monotonicity(   n0,     u0, ppoly_r_E )
+      call PPM_reconstruction( n0, h0, u0, ppoly_r_E, ppoly_r_coefs, h_neglect, answer_date=CS%answer_date )
+      if ( CS%boundary_extrapolation ) then
+        call PPM_boundary_extrapolation( n0, h0, u0, ppoly_r_E, ppoly_r_coefs, h_neglect )
+      endif
+      iMethod = INTEGRATION_PPM
+    case ( REMAPPING_PPM_CWK )
+      call edge_values_explicit_k4cw( n0, h0, u0, ppoly_r_E, h_neg_edge )
       call PPM_monotonicity(   n0,     u0, ppoly_r_E )
       call PPM_reconstruction( n0, h0, u0, ppoly_r_E, ppoly_r_coefs, h_neglect, answer_date=CS%answer_date )
       if ( CS%boundary_extrapolation ) then
@@ -1725,6 +1737,9 @@ subroutine setReconstructionType(string,CS)
       degree = 1
     case ("PPM_CW")
       CS%remapping_scheme = REMAPPING_PPM_CW
+      degree = 2
+    case ("PPM_CWK")
+      CS%remapping_scheme = REMAPPING_PPM_CWK
       degree = 2
     case ("PPM_H4")
       CS%remapping_scheme = REMAPPING_PPM_H4

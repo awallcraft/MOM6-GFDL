@@ -24,6 +24,7 @@ use MOM_interface_heights,only : find_eta, calc_derived_thermo
 use MOM_open_boundary,    only : ocean_OBC_type, OBC_DIRECTION_E, OBC_DIRECTION_W
 use MOM_open_boundary,    only : OBC_DIRECTION_N, OBC_DIRECTION_S
 use MOM_regridding,       only : initialize_regridding, regridding_main, end_regridding
+use MOM_regridding,       only : regridding_target_anomaly
 use MOM_regridding,       only : uniformResolution
 use MOM_regridding,       only : inflate_vanished_layers_old
 use MOM_regridding,       only : regridding_preadjust_reqs, convective_adjustment
@@ -118,7 +119,15 @@ type, public :: ALE_CS ; private
   integer :: id_T_preale = -1 !< diagnostic id for temperatures before ALE.
   integer :: id_S_preale = -1 !< diagnostic id for salinities before ALE.
   integer :: id_e_preale = -1 !< diagnostic id for interface heights before ALE.
-  integer :: id_vert_remap_h = -1      !< diagnostic id for layer thicknesses used for remapping
+  integer :: id_R_preale = -1 !< diagnostic id for HYCOM1 potential density before ALE
+  integer :: id_Ri_preale = -1    !< diagnostic id for interface density before ALE
+  integer :: id_RiA_preale = -1   !< diagnostic id for interface density anomalies before ALE
+  integer :: id_vert_remap_h = -1 !< diagnostic id for layer thicknesses before ALE
+
+  ! diagnostic for fields after applying ALE remapping
+  integer :: id_R_remap = -1   !< diagnostic id for HYCOM1 potential density after remapping
+  integer :: id_Ri_remap = -1  !< diagnostic id for interface density after remapping
+  integer :: id_RiA_remap = -1 !< diagnostic id for interface density anomalies after remapping
   integer :: id_vert_remap_h_tendency = -1 !< diagnostic id for layer thickness tendency due to ALE
   integer :: id_remap_delta_integ_u2 = -1  !< Change in depth-integrated rho0*u**2/2
   integer :: id_remap_delta_integ_v2 = -1  !< Change in depth-integrated rho0*v**2/2
@@ -148,6 +157,7 @@ public ALE_writeCoordinateFile
 public ALE_updateVerticalGridType
 public ALE_initThicknessToCoord
 public ALE_update_regrid_weights
+public post_ALE_diagnostics
 public pre_ALE_diagnostics
 public pre_ALE_adjustments
 public ALE_remap_init_conds
@@ -400,11 +410,23 @@ subroutine ALE_register_diags(Time, G, GV, US, diag, CS)
       'Salinity before remapping', 'PSU', conversion=US%S_to_ppt)
   CS%id_e_preale = register_diag_field('ocean_model', 'e_preale', diag%axesTi, Time, &
       'Interface Heights before remapping', 'm', conversion=US%Z_to_m)
+  CS%id_R_preale = register_diag_field('ocean_model', 'R_preale', diag%axesTL, Time, &
+      'HYCOM1 potential density before regridding', 'kg m-3', conversion=US%R_to_kg_m3)
+  CS%id_Ri_preale = register_diag_field('ocean_model', 'Ri_preale', diag%axesTi, Time, &
+      'Interface density before HYCOM1 regridding', 'kg m-3', conversion=US%R_to_kg_m3)
+  CS%id_RiA_preale = register_diag_field('ocean_model', 'RiA_preale', diag%axesTi, Time, &
+      'Interface density anomalies before HYCOM1 regridding', 'kg m-3', conversion=US%R_to_kg_m3)
 
+  CS%id_R_remap = register_diag_field('ocean_model', 'R_remap', diag%axesTL, Time, &
+      'HYCOM1 potential density after ALE remapping', 'kg m-3', conversion=US%R_to_kg_m3)
+  CS%id_Ri_remap = register_diag_field('ocean_model', 'Ri_remap', diag%axesTi, Time, &
+      'Interface density after ALE remapping', 'kg m-3', conversion=US%R_to_kg_m3)
+  CS%id_RiA_remap = register_diag_field('ocean_model', 'RiA_remap', diag%axesTi, Time, &
+      'Interface density anomalies after ALE remapping', 'kg m-3', conversion=US%R_to_kg_m3)
   CS%id_dzRegrid = register_diag_field('ocean_model', 'dzRegrid', diag%axesTi, Time, &
       'Change in interface height due to ALE regridding', 'm', conversion=GV%H_to_m)
   CS%id_vert_remap_h = register_diag_field('ocean_model', 'vert_remap_h', diag%axestl, Time, &
-      'layer thicknesses after ALE regridding and remapping', &
+      'layer thicknesses before ALE regridding and remapping', &
       thickness_units, conversion=GV%H_to_MKS, v_extensive=.true.)
   CS%id_vert_remap_h_tendency = register_diag_field('ocean_model', &
       'vert_remap_h_tendency', diag%axestl, Time, &
@@ -455,9 +477,9 @@ subroutine ALE_end(CS)
 
 end subroutine ALE_end
 
-!> Save any diagnostics of the state before ALE remapping.  These diagnostics are
-!! mostly used for debugging.
-subroutine pre_ALE_diagnostics(G, GV, US, h, u, v, tv, CS)
+!> Save any diagnostics of the state before ALE gridding and remapping.
+!! These diagnostics are mostly used for debugging.
+subroutine pre_ALE_diagnostics(G, GV, US, h, u, v, tv, CS, frac_shelf_h)
   type(ocean_grid_type),                      intent(in)    :: G   !< Ocean grid informations
   type(verticalGrid_type),                    intent(in)    :: GV  !< Ocean vertical grid structure
   type(unit_scale_type),                      intent(in)    :: US  !< A dimensional unit scaling type
@@ -467,9 +489,13 @@ subroutine pre_ALE_diagnostics(G, GV, US, h, u, v, tv, CS)
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), intent(inout) :: v   !< Meridional velocity field [L T-1 ~> m s-1]
   type(thermo_var_ptrs),                      intent(inout) :: tv  !< Thermodynamic variable structure
   type(ALE_CS),                               pointer       :: CS  !< Regridding parameters and options
+  real, dimension(SZI_(G),SZJ_(G)), optional, intent(in)    :: frac_shelf_h !< Fractional ice shelf coverage [nondim]
 
   ! Local variables
   real :: eta_preale(SZI_(G),SZJ_(G),SZK_(GV)+1)  ! Interface heights before remapping [Z ~> m]
+  real ::   R_preale(SZI_(G),SZJ_(G),SZK_(GV))    ! Potential Density before HYCOM1 [R ~> kg m-3]
+  real ::  Ri_preale(SZI_(G),SZJ_(G),SZK_(GV)+1)  ! Interface Density before HYCOM1 [R ~> kg m-3]
+  real :: RiA_preale(SZI_(G),SZJ_(G),SZK_(GV)+1)  ! Interface Density Anomalies before HYCOM1 [R ~> kg m-3]
 
   if (CS%id_u_preale > 0) call post_data(CS%id_u_preale, u,    CS%diag)
   if (CS%id_v_preale > 0) call post_data(CS%id_v_preale, v,    CS%diag)
@@ -480,9 +506,57 @@ subroutine pre_ALE_diagnostics(G, GV, US, h, u, v, tv, CS)
     call find_eta(h, tv, G, GV, US, eta_preale, dZref=G%Z_ref)
     call post_data(CS%id_e_preale, eta_preale, CS%diag)
   endif
+  if (CS%id_RiA_preale > 0 .or. CS%id_Ri_preale> 0 .or. CS%id_R_preale> 0) then
+    call regridding_target_anomaly(CS%remapCS, CS%regridCS, G, GV, US, h, tv, R_preale, Ri_preale, RiA_preale, &
+                          frac_shelf_h=frac_shelf_h)
+  endif
+  if (CS%id_RiA_preale > 0) then
+    call post_data(CS%id_RiA_preale, RiA_preale, CS%diag)
+  endif
+  if (CS%id_Ri_preale > 0) then
+    call post_data(CS%id_Ri_preale, Ri_preale, CS%diag)
+  endif
+  if (CS%id_R_preale> 0) then
+    call post_data(CS%id_R_preale, R_preale, CS%diag)
+  endif
 
 end subroutine pre_ALE_diagnostics
 
+!> Save some diagnostics of the state after ALE gridding and remapping.
+!! ALE_remap_tracers also saves related diagnostics.
+!! These diagnostics are mostly used for debugging.
+subroutine post_ALE_diagnostics(G, GV, US, h, u, v, tv, CS, frac_shelf_h)
+  type(ocean_grid_type),                      intent(in)    :: G   !< Ocean grid informations
+  type(verticalGrid_type),                    intent(in)    :: GV  !< Ocean vertical grid structure
+  type(unit_scale_type),                      intent(in)    :: US  !< A dimensional unit scaling type
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)),  intent(inout) :: h   !< Current 3D grid obtained after the
+                                                                   !! last time step [H ~> m or kg m-2]
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), intent(inout) :: u   !< Zonal velocity field [L T-1 ~> m s-1]
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), intent(inout) :: v   !< Meridional velocity field [L T-1 ~> m s-1]
+  type(thermo_var_ptrs),                      intent(inout) :: tv  !< Thermodynamic variable structure
+  type(ALE_CS),                               pointer       :: CS  !< Regridding parameters and options
+  real, dimension(SZI_(G),SZJ_(G)), optional, intent(in)    :: frac_shelf_h !< Fractional ice shelf coverage [nondim]
+
+  ! Local variables
+  real ::   R_remap(SZI_(G),SZJ_(G),SZK_(GV))   ! HYCOM1 Potential Density after ALE [R ~> kg m-3]
+  real ::  Ri_remap(SZI_(G),SZJ_(G),SZK_(GV)+1) ! Interface Density after ALE [R ~> kg m-3]
+  real :: RiA_remap(SZI_(G),SZJ_(G),SZK_(GV)+1) ! Interface Density Anomalies after ALE [R ~> kg m-3]
+
+  if (CS%id_RiA_remap > 0 .or. CS%id_Ri_remap> 0 .or. CS%id_R_remap> 0) then
+    call regridding_target_anomaly(CS%remapCS, CS%regridCS, G, GV, US, h, tv, R_remap, Ri_remap, RiA_remap, &
+                          frac_shelf_h=frac_shelf_h)
+  endif
+  if (CS%id_RiA_remap > 0) then
+    call post_data(CS%id_RiA_remap, RiA_remap, CS%diag)
+  endif
+  if (CS%id_Ri_remap > 0) then
+    call post_data(CS%id_Ri_remap, Ri_remap, CS%diag)
+  endif
+  if (CS%id_R_remap> 0) then
+    call post_data(CS%id_R_remap, R_remap, CS%diag)
+  endif
+
+end subroutine post_ALE_diagnostics
 
 !> Potentially do some preparatory work, such as convective adjustment, to clean up the model
 !! state before regridding.
@@ -640,7 +714,8 @@ end subroutine ALE_offline_inputs
 
 !> For a state-based coordinate, accelerate the process of regridding by
 !! repeatedly applying the grid calculation algorithm
-subroutine ALE_regrid_accelerated(CS, G, GV, US, h, tv, n_itt, u, v, OBC, Reg, dt, dzRegrid, initial)
+subroutine ALE_regrid_accelerated(CS, G, GV, US, h, tv, n_itt, u, v, OBC, &
+                                  Reg, dt, dzRegrid, initial)
   type(ALE_CS),            pointer       :: CS     !< ALE control structure
   type(ocean_grid_type),   intent(inout) :: G      !< Ocean grid
   type(verticalGrid_type), intent(in)    :: GV     !< Vertical grid
@@ -864,7 +939,6 @@ subroutine ALE_remap_tracers(CS, G, GV, h_old, h_new, Reg, debug, dt, PCM_cell)
     enddo ! m=1,ntr
 
   endif  ! endif for ntr > 0
-
 
   if (CS%id_vert_remap_h > 0) call post_data(CS%id_vert_remap_h, h_old, CS%diag)
   if ((CS%id_vert_remap_h_tendency > 0) .and. present(dt)) then

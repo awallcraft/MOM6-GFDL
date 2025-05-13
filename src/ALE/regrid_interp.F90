@@ -7,7 +7,7 @@ use MOM_error_handler, only : MOM_error, FATAL
 use MOM_string_functions, only : uppercase
 
 use regrid_edge_values, only : edge_values_explicit_h2, edge_values_explicit_h4
-use regrid_edge_values, only : edge_values_explicit_h4cw
+use regrid_edge_values, only : edge_values_explicit_h4cw, edge_values_explicit_k4cw
 use regrid_edge_values, only : edge_values_implicit_h4, edge_values_implicit_h6
 use regrid_edge_values, only : edge_slopes_implicit_h3, edge_slopes_implicit_h5
 
@@ -46,6 +46,7 @@ integer, parameter :: INTERPOLATION_P1M_H4     = 1 !< O(h^2)
 integer, parameter :: INTERPOLATION_P1M_IH4    = 2 !< O(h^2)
 integer, parameter :: INTERPOLATION_PLM        = 3 !< O(h^2)
 integer, parameter :: INTERPOLATION_PPM_CW     =10 !< O(h^3)
+integer, parameter :: INTERPOLATION_PPM_CWK    =11 !< O(h^3)
 integer, parameter :: INTERPOLATION_PPM_H4     = 4 !< O(h^3)
 integer, parameter :: INTERPOLATION_PPM_IH4    = 5 !< O(h^3)
 integer, parameter :: INTERPOLATION_P3M_IH4IH3 = 6 !< O(h^4)
@@ -153,6 +154,25 @@ subroutine regridding_set_ppolys(CS, densities, n0, h0, ppoly0_E, ppoly0_S, &
       if ( n0 >= 4 ) then
         degree = DEGREE_2
         call edge_values_explicit_h4cw( n0, h0, densities, ppoly0_E, h_neg_edge )
+        call PPM_monotonicity(   n0,     densities, ppoly0_E )
+        call PPM_reconstruction( n0, h0, densities, ppoly0_E, ppoly0_coefs, h_neglect, answer_date=CS%answer_date )
+        if (extrapolate) then
+          call PPM_boundary_extrapolation( n0, h0, densities, ppoly0_E, &
+                                           ppoly0_coefs, h_neglect )
+        endif
+      else
+        degree = DEGREE_1
+        call edge_values_explicit_h2( n0, h0, densities, ppoly0_E )
+        call P1M_interpolation( n0, h0, densities, ppoly0_E, ppoly0_coefs, h_neglect, answer_date=CS%answer_date )
+        if (extrapolate) then
+          call P1M_boundary_extrapolation( n0, h0, densities, ppoly0_E, ppoly0_coefs )
+        endif
+      endif
+
+    case ( INTERPOLATION_PPM_CWK )
+      if ( n0 >= 4 ) then
+        degree = DEGREE_2
+        call edge_values_explicit_k4cw( n0, h0, densities, ppoly0_E, h_neg_edge )
         call PPM_monotonicity(   n0,     densities, ppoly0_E )
         call PPM_reconstruction( n0, h0, densities, ppoly0_E, ppoly0_coefs, h_neglect, answer_date=CS%answer_date )
         if (extrapolate) then
@@ -510,7 +530,7 @@ end function get_polynomial_coordinate
 !> Numeric value of interpolation_scheme corresponding to scheme name
 integer function interpolation_scheme(interp_scheme)
   character(len=*), intent(in) :: interp_scheme !< Name of the interpolation scheme
-        !! Valid values include "P1M_H2", "P1M_H4", "P1M_IH2", "PLM", "PPM_CW", "PPM_H4",
+        !! Valid values include "P1M_H2", "P1M_H4", "P1M_IH2", "PLM", "PPM_CW", "PPM_CWK", "PPM_H4",
         !!   "PPM_IH4", "P3M_IH4IH3", "P3M_IH6IH5", "PQM_IH4IH3", and "PQM_IH6IH5"
 
   select case ( uppercase(trim(interp_scheme)) )
@@ -519,6 +539,7 @@ integer function interpolation_scheme(interp_scheme)
     case ("P1M_IH2");    interpolation_scheme = INTERPOLATION_P1M_IH4
     case ("PLM");        interpolation_scheme = INTERPOLATION_PLM
     case ("PPM_CW");     interpolation_scheme = INTERPOLATION_PPM_CW
+    case ("PPM_CWK");    interpolation_scheme = INTERPOLATION_PPM_CWK
     case ("PPM_H4");     interpolation_scheme = INTERPOLATION_PPM_H4
     case ("PPM_IH4");    interpolation_scheme = INTERPOLATION_PPM_IH4
     case ("P3M_IH4IH3"); interpolation_scheme = INTERPOLATION_P3M_IH4IH3
@@ -534,7 +555,7 @@ end function interpolation_scheme
 subroutine set_interp_scheme(CS, interp_scheme)
   type(interp_CS_type), intent(inout) :: CS  !< A control structure for regrid_interp
   character(len=*),     intent(in) :: interp_scheme !< Name of the interpolation scheme
-        !! Valid values include "P1M_H2", "P1M_H4", "P1M_IH2", "PLM", "PPM_CW", "PPM_H4",
+        !! Valid values include "P1M_H2", "P1M_H4", "P1M_IH2", "PLM", "PPM_CW", "PPM_CWK", "PPM_H4",
         !!   "PPM_IH4", "P3M_IH4IH3", "P3M_IH6IH5", "PQM_IH4IH3", and "PQM_IH6IH5"
 
   CS%interpolation_scheme = interpolation_scheme(interp_scheme)

@@ -37,6 +37,7 @@ type, public :: hycom_CS ; private
 end type hycom_CS
 
 public init_coord_hycom, set_hycom_params, build_hycom1_column, end_coord_hycom
+public build_hycom1_target_anomaly
 
 contains
 
@@ -132,7 +133,9 @@ subroutine build_hycom1_column(CS, remapCS, eqn_of_state, nz, depth, h, T, S, p_
   real, dimension(CS%nk)   :: T_col_new ! New layer temperatures [C ~> degC]
   real, dimension(CS%nk)   :: S_col_new ! New layer salinities [S ~> ppt]
   real, dimension(CS%nk)   :: p_col_new ! New layer pressure [R L2 T-2 ~> Pa]
-  real, dimension(CS%nk+1) :: RiA_ini   ! Initial nk+1 interface density anomaly w.r.t. the
+  real, dimension(CS%nk+1) :: Ri_ini    ! Initial interface density [R ~> kg m-3]
+  real, dimension(CS%nk+1) :: Ri_new    ! New interface density [R ~> kg m-3]
+  real, dimension(CS%nk+1) :: RiA_ini   ! Initial interface density anomaly w.r.t. the
                                         ! interface target densities [R ~> kg m-3]
   real, dimension(CS%nk+1) :: RiA_new   ! New interface density anomaly w.r.t. the
                                         ! interface target densities [R ~> kg m-3]
@@ -151,7 +154,7 @@ subroutine build_hycom1_column(CS, remapCS, eqn_of_state, nz, depth, h, T, S, p_
 
   if (CS%only_improves .and. nz == CS%nk) then
     call build_hycom1_target_anomaly(CS, remapCS, eqn_of_state, CS%nk, depth, &
-        h, T, S, p_col, rho_col, RiA_ini, h_neglect, h_neglect_edge)
+        h, T, S, p_col, rho_col, Ri_ini, RiA_ini, h_neglect, h_neglect_edge)
   else
     ! Work bottom recording potential density
     call calculate_density(T, S, p_col, rho_col, eqn_of_state)
@@ -178,7 +181,7 @@ subroutine build_hycom1_column(CS, remapCS, eqn_of_state, nz, depth, h, T, S, p_
     call remapping_core_h(remapCS, nz, h(:), T, CS%nk, h_col_new, T_col_new)
     call remapping_core_h(remapCS, nz, h(:), S, CS%nk, h_col_new, S_col_new)
     call build_hycom1_target_anomaly(CS, remapCS, eqn_of_state, CS%nk, depth, &
-        h_col_new, T_col_new, S_col_new, p_col_new, r_col_new, RiA_new, h_neglect, h_neglect_edge)
+        h_col_new, T_col_new, S_col_new, p_col_new, r_col_new, Ri_new, RiA_new, h_neglect, h_neglect_edge)
     do k= 2,CS%nk
       if     ( abs(RiA_ini(K)) <= abs(RiA_new(K)) .and. z_col(K) > z_col_new(K-1) .and. &
                z_col(K) < z_col_new(K+1)) then
@@ -211,7 +214,7 @@ end subroutine build_hycom1_column
 
 !> Calculate interface density anomaly w.r.t. the target.
 subroutine build_hycom1_target_anomaly(CS, remapCS, eqn_of_state, nz, depth, h, T, S, p_col, &
-                                       R, RiAnom, h_neglect, h_neglect_edge)
+                                       R, Ri, RiAnom, h_neglect, h_neglect_edge)
   type(hycom_CS),        intent(in)  :: CS     !< Coordinate control structure
   type(remapping_CS),    intent(in)  :: remapCS !< Remapping parameters and options
   type(EOS_type),        intent(in)  :: eqn_of_state !< Equation of state structure
@@ -222,7 +225,8 @@ subroutine build_hycom1_target_anomaly(CS, remapCS, eqn_of_state, nz, depth, h, 
   real, dimension(nz),   intent(in)  :: h      !< Layer thicknesses [H ~> m or kg m-2]
   real, dimension(nz),   intent(in)  :: p_col  !< Layer pressure [R L2 T-2 ~> Pa]
   real, dimension(nz),   intent(out) :: R      !< Layer density [R ~> kg m-3]
-  real, dimension(nz+1), intent(out) :: RiAnom !< The interface density anomaly
+  real, dimension(nz+1), intent(out) :: Ri     !< Interface density [R ~> kg m-3]
+  real, dimension(nz+1), intent(out) :: RiAnom !< Interface density anomaly
                                                !! w.r.t. the interface target
                                                !! densities [R ~> kg m-3]
   real,                  intent(in)  :: h_neglect !< A negligibly small width for the purpose of
@@ -248,18 +252,21 @@ subroutine build_hycom1_target_anomaly(CS, remapCS, eqn_of_state, nz, depth, h, 
                              degree, h_neglect, h_neglect_edge)
 
   R(1) = rho_col(1)
-  RiAnom(1) = ppoly_E(1,1) - CS%target_density(1)
+  Ri(1) = ppoly_E(1,1)
+  RiAnom(1) = Ri(1) - CS%target_density(1)
   do k= 2,nz
     R(k) = rho_col(k)
     if (ppoly_E(k-1,2) > CS%target_density(k)) then
-      RiAnom(k) = ppoly_E(k-1,2) - CS%target_density(k)  !interface is heavier than target
+      Ri(k) = ppoly_E(k-1,2)  !interface is heavier than target
     elseif (ppoly_E(k,1) < CS%target_density(k)) then
-      RiAnom(k) = ppoly_E(k,1)   - CS%target_density(k)  !interface is lighter than target
+      Ri(k) = ppoly_E(k,1)    !interface is lighter than target
     else
-      RiAnom(k) = 0.0  !interface spans the target
+      Ri(k) = CS%target_density(k)  !interface spans the target
     endif
+    RiAnom(k) = Ri(k) - CS%target_density(k)
   enddo
-  RiAnom(nz+1) = ppoly_E(nz,2) - CS%target_density(nz+1)
+  Ri(nz+1) = ppoly_E(nz,2)
+  RiAnom(nz+1) = Ri(nz+1) - CS%target_density(nz+1)
 
 end subroutine build_hycom1_target_anomaly
 
